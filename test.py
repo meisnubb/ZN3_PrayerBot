@@ -213,13 +213,14 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "\n\n".join([f"📝 {date}: {msg}" for date, msg in rows])
         text = f"📖 Your past revelations:\n\n{text}"
 
-    keyboard = [[InlineKeyboardButton("↩️ Back", callback_data="back")]]
+    keyboard = [[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Handle both command and button cases
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup)
     elif update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
 
 async def allstreaks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = get_all_streaks()
@@ -264,7 +265,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             "Awesome 🙌 Please type your revelation for today:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
         )
         return
 
@@ -275,6 +276,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ Not yet? No worries — I’ll remind you in 1 hour.",
             reply_markup=main_menu_keyboard()
         )
+        return
+
+    if data == "history":
+        await history_cmd(update, context)
         return
 
     if data == "back":
