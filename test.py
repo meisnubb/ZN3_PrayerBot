@@ -17,7 +17,7 @@ from telegram.ext import (
 # CONFIG
 # =============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway will inject this
+DATABASE_URL = os.getenv("postgresql://postgres:lsnvRsPDSoqqJbFEBHpSUptIEIlwLcLA@turntable.proxy.rlwy.net:28453/railway")  # Railway will inject this
 
 REMINDER_MESSAGES = [
     "⏰ Gentle reminder: Have you done your QT?",
