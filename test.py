@@ -155,9 +155,12 @@ def _cancel_user_job(user_id: int) -> bool:
     return False
 
 def streak_visual(streak: int) -> str:
-    total = 5
-    fire = "🔥" * min(streak, total)
-    white = "⚪" * (total - min(streak, total))
+    total = 7  # 7-day cycle
+    remainder = streak % total
+    if remainder == 0 and streak > 0:
+        remainder = 7
+    fire = "🔥" * remainder
+    white = "⚪" * (total - remainder)
     return fire + white
 
 def streak_message(current: int, longest: int) -> str:
@@ -216,7 +219,6 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Handle both command and button cases
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup)
     elif update.callback_query:
