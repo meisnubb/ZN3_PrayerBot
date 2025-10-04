@@ -16,8 +16,8 @@ from telegram.ext import (
 # =============================
 # CONFIG
 # =============================
-BOT_TOKEN = os.getenv("BOT_TOKEN")        # Railway Variables
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway Variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")        # will pull from Railway Variables
+DATABASE_URL = os.getenv("DATABASE_URL")  # will pull from Railway Variables
 
 REMINDER_MESSAGES = [
     "⏰ Gentle reminder: Have you done your QT?",
@@ -26,8 +26,6 @@ REMINDER_MESSAGES = [
     "🙏 Hello! Just checking: QT done yet?",
     "🕊️ A nudge for QT — you got this!"
 ]
-
-RESET_MESSAGE = "🌅 New day, new start! Your streak reset overnight, but it’s never too late to build it back up. You got this! 💯🔥"
 
 sg_timezone = pytz.timezone("Asia/Singapore")
 
@@ -106,7 +104,7 @@ def get_revelations(user_id: int):
 def get_all_streaks():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id, name, current_streak, longest_streak, last_date FROM users")
+    c.execute("SELECT name, current_streak, longest_streak FROM users ORDER BY current_streak DESC, longest_streak DESC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -233,7 +231,7 @@ async def allstreaks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     leaderboard = "\n".join([
         f"{i+1}. {name or 'Unknown'} — 🔥 {streak} (Longest: {longest})"
-        for i, (user_id, name, streak, longest, last_date) in enumerate(rows)
+        for i, (name, streak, longest) in enumerate(rows)
     ])
     await update.message.reply_text(f"📊 Streak Leaderboard:\n\n{leaderboard}")
 
@@ -297,7 +295,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         leaderboard = "\n".join([
             f"{i+1}. {name or 'Unknown'} — 🔥 {streak} (Longest: {longest})"
-            for i, (user_id, name, streak, longest, last_date) in enumerate(rows)
+            for i, (name, streak, longest) in enumerate(rows)
         ])
         await query.edit_message_text(
             f"📊 Streak Leaderboard:\n\n{leaderboard}",
@@ -365,23 +363,7 @@ async def reminder_job_once(context: ContextTypes.DEFAULT_TYPE):
     user_jobs.pop(user_id, None)
 
 async def daily_qt_check(context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now(sg_timezone).strftime("%d/%m/%y")
-    yesterday = (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y")
-
-    # Get all users
-    rows = get_all_streaks()
-
-    for user_id, name, streak, longest, last_date in rows:
-        # Break streak if no QT today
-        if last_date != today:
-            update_user(user_id, name, 0, longest, last_date)  # reset streak
-            await context.bot.send_message(
-                chat_id=int(user_id),
-                text=RESET_MESSAGE,
-                reply_markup=main_menu_keyboard()
-            )
-
-    # Continue with nightly reminder
+    """21:00 reminder job"""
     for user_id in list(user_qt_done.keys()):
         user_qt_done[user_id] = False
         user_name = context.bot_data.get(user_id, "friend")
@@ -391,6 +373,23 @@ async def daily_qt_check(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=yes_no_keyboard()
         )
         _schedule_forced_reminder(user_id, context, delay_hours=1)
+
+async def streak_break_job(context: ContextTypes.DEFAULT_TYPE):
+    """00:00 streak break reset job"""
+    today = datetime.now(sg_timezone).strftime("%d/%m/%y")
+    for user_id in list(user_qt_done.keys()):
+        if not user_qt_done.get(user_id, False):
+            # streak broken
+            user = get_user(user_id)
+            if user:
+                _, longest, _ = user
+                update_user(user_id, context.bot_data.get(user_id, "friend"), 0, longest, today)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="New day, new start 🌅 Your streak reset overnight, but it’s never too late to build it back up. You got this! 💯🔥"
+            )
+        # reset for the new day
+        user_qt_done[user_id] = False
 
 # =============================
 # MAIN
@@ -407,10 +406,19 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     singapore_tz = pytz.timezone("Asia/Singapore")
+
+    # Reminder at 21:00
     app.job_queue.run_daily(
         daily_qt_check,
-        time=time(hour=23, minute=59, tzinfo=singapore_tz),  # streak reset & nightly reminder
+        time=time(hour=21, minute=0, tzinfo=singapore_tz),
         name="daily_qt_check"
+    )
+
+    # Streak break reset at 00:00
+    app.job_queue.run_daily(
+        streak_break_job,
+        time=time(hour=0, minute=0, tzinfo=singapore_tz),
+        name="streak_break_job"
     )
 
     print("🤖 ZN3 PrayerBot running on Railway (with Postgres)…")
