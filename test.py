@@ -1,6 +1,7 @@
 import os
 import random
 import psycopg2
+from cryptography.fernet import Fernet
 from datetime import timedelta, time, datetime
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +19,8 @@ from telegram.ext import (
 # =============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")        # will pull from Railway Variables
 DATABASE_URL = os.getenv("DATABASE_URL")  # will pull from Railway Variables
+REVELATION_KEY = os.getenv("REVELATION_KEY")  # secret key for encryption
+fernet = Fernet(REVELATION_KEY)
 
 REMINDER_MESSAGES = [
     "⏰ Gentle reminder: Have you done your QT?",
@@ -87,9 +90,11 @@ def update_user(user_id: int, name: str, streak: int, longest: int, last_date: s
     conn.close()
 
 def add_revelation(user_id: int, date: str, text: str):
+    encrypted_text = fernet.encrypt(text.encode()).decode()
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO revelations (user_id, date, text) VALUES (%s, %s, %s)", (str(user_id), date, text))
+    c.execute("INSERT INTO revelations (user_id, date, text) VALUES (%s, %s, %s)",
+              (str(user_id), date, encrypted_text))
     conn.commit()
     conn.close()
 
@@ -99,7 +104,15 @@ def get_revelations(user_id: int):
     c.execute("SELECT date, text FROM revelations WHERE user_id=%s ORDER BY id ASC", (str(user_id),))
     rows = c.fetchall()
     conn.close()
-    return rows
+
+    decrypted_rows = []
+    for date, encrypted_text in rows:
+        try:
+            decrypted_text = fernet.decrypt(encrypted_text.encode()).decode()
+        except Exception:
+            decrypted_text = "⚠️ Unable to decrypt (corrupted entry)"
+        decrypted_rows.append((date, decrypted_text))
+    return decrypted_rows
 
 def get_all_streaks():
     conn = get_db_connection()
@@ -363,7 +376,6 @@ async def reminder_job_once(context: ContextTypes.DEFAULT_TYPE):
     user_jobs.pop(user_id, None)
 
 async def daily_qt_check(context: ContextTypes.DEFAULT_TYPE):
-    """21:00 reminder job"""
     for user_id in list(user_qt_done.keys()):
         user_qt_done[user_id] = False
         user_name = context.bot_data.get(user_id, "friend")
@@ -373,23 +385,6 @@ async def daily_qt_check(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=yes_no_keyboard()
         )
         _schedule_forced_reminder(user_id, context, delay_hours=1)
-
-async def streak_break_job(context: ContextTypes.DEFAULT_TYPE):
-    """00:00 streak break reset job"""
-    today = datetime.now(sg_timezone).strftime("%d/%m/%y")
-    for user_id in list(user_qt_done.keys()):
-        if not user_qt_done.get(user_id, False):
-            # streak broken
-            user = get_user(user_id)
-            if user:
-                _, longest, _ = user
-                update_user(user_id, context.bot_data.get(user_id, "friend"), 0, longest, today)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="New day, new start 🌅 Your streak reset overnight, but it’s never too late to build it back up. You got this! 💯🔥"
-            )
-        # reset for the new day
-        user_qt_done[user_id] = False
 
 # =============================
 # MAIN
@@ -406,22 +401,13 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     singapore_tz = pytz.timezone("Asia/Singapore")
-
-    # Reminder at 21:00
     app.job_queue.run_daily(
         daily_qt_check,
         time=time(hour=21, minute=0, tzinfo=singapore_tz),
         name="daily_qt_check"
     )
 
-    # Streak break reset at 00:00
-    app.job_queue.run_daily(
-        streak_break_job,
-        time=time(hour=0, minute=0, tzinfo=singapore_tz),
-        name="streak_break_job"
-    )
-
-    print("🤖 ZN3 PrayerBot running on Railway (with Postgres)…")
+    print("🤖 ZN3 PrayerBot running on Railway (with Postgres + Encrypted Revelations)…")
     app.run_polling()
 
 if __name__ == "__main__":
