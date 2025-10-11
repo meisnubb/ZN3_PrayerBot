@@ -34,6 +34,8 @@ REMINDER_MESSAGES = [
     "✨ QT reminder — take a quiet moment today.",
     "🙏 Hello! Just checking: QT done yet?",
     "🕊️ A nudge for QT — you got this!",
+    "🔥 Keep the streak alive! QT time 🙏",
+    "📿 Take a pause and connect with Him now ❤️"
 ]
 
 # Runtime (not persisted)
