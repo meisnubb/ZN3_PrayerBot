@@ -32,7 +32,7 @@ REMINDER_MESSAGES = [
     "⏰ Gentle reminder: Have you done your QT?",
     "📖 Daily bread check-in — QT time?",
     "✨ QT reminder — take a quiet moment today.",
-    "🙏 Hello! Just checking: QT done yet?",
+    "🙏 Hello! Just checking: have you done your QT yet?",
     "🕊️ A nudge for QT — you got this!",
     "🔥 Keep the streak alive! QT time 🙏",
     "📿 Take a pause and connect with Him now ❤️"
@@ -266,7 +266,7 @@ async def reminder_followup(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.chat_id
     if not user_qt_done.get(user_id, False) and not user_cancelled_today.get(user_id, False):
         try:
-            await context.bot.send_message(chat_id=user_id, text="👋 Hello! Just checking: QT done yet?", reply_markup=menu_keyboard())
+            await context.bot.send_message(chat_id=user_id, text="👋 Hello! Have u done ur QT 🤨?", reply_markup=menu_keyboard())
         except Exception:
             pass
     followup_jobs.pop(user_id, None)
@@ -304,13 +304,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "friend"
     ensure_user_record(uid, name)
     user_qt_done[uid] = False
+
+    # 👋 Friendly intro message
+    welcome_message = (
+        f"Hello {name}! 🙌\n"
+        "I’m ZN3 PrayerBot.\n"
+        "Let’s grow together in our commitment and faith 🙏👋"
+    )
+    await update.message.reply_text(welcome_message)
+
+    # Continue with streak info + main menu
     row = get_user(uid)
     if row:
         current, longest, _, _, rh, rm = row
     else:
         current, longest, rh, rm = 0, 0, None, None
+
     text = streak_message_block(current, longest, rh, rm)
     await update.message.reply_text(text, reply_markup=menu_keyboard())
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -346,7 +358,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cancel_today":
         cancel_user_jobs(uid)
         user_cancelled_today[uid] = True
-        await q.edit_message_text("🔕 You’ve cancelled reminders for today. See you tomorrow!", reply_markup=back_keyboard())
+        await q.edit_message_text("🔕 You’ve cancelled reminders for today, rmb to do QT or brk streak😢 . See you tomorrow!", reply_markup=back_keyboard())
         return
 
     if data == "yes":
