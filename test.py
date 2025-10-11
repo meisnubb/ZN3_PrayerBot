@@ -36,7 +36,7 @@ REMINDER_MESSAGES = [
     "🕊️ A nudge for QT — you got this!"
 ]
 
-# Track running state (not persisted)
+# Track running state
 user_qt_done: dict[int, bool] = {}
 user_jobs: dict[int, object] = {}
 
@@ -328,7 +328,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🙏 Welcome back!", reply_markup=main_menu_keyboard())
 
 # =============================
-# MESSAGE HANDLER
+# MESSAGE HANDLER (FIXED)
 # =============================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -343,8 +343,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         current, longest, last_date, _ = user
 
-        # If streak reset overnight, restart it automatically when user sends revelation
-        if current == 0 and last_date != today:
+        # ✅ FIXED: Restart streak automatically if it was reset overnight
+        if current == 0 or last_date != today:
             current = 1
             longest = max(longest, current)
             update_user(user_id, user_name, current, longest, today)
@@ -423,13 +423,11 @@ def main():
 
     singapore_tz = pytz.timezone("Asia/Singapore")
 
-    # Midnight streak check
     app.job_queue.run_daily(
         nightly_reset_job,
         time=time(hour=0, minute=0, tzinfo=singapore_tz),
         name="nightly_reset_job"
     )
-    # Daily reminder
     app.job_queue.run_daily(
         nightly_21_check,
         time=time(hour=21, minute=0, tzinfo=singapore_tz),
