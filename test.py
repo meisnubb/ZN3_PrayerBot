@@ -493,7 +493,7 @@ def main():
 
     app.job_queue.run_daily(
         nightly_reset_job,
-        time=time(hour=11, minute=19, tzinfo=singapore_tz),
+        time=time(hour=11, minute=21, tzinfo=singapore_tz),
         name="nightly_reset_job"
     )
 
