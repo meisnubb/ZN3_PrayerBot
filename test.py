@@ -18,9 +18,9 @@ from telegram.ext import (
 # =============================
 # CONFIG & ENV
 # =============================
-BOT_TOKEN = os.getenv("BOT_TOKEN")          # Railway variable
-DATABASE_URL = os.getenv("DATABASE_URL")    # Railway variable
-REVELATION_KEY = os.getenv("REVELATION_KEY")  # Railway variable
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+REVELATION_KEY = os.getenv("REVELATION_KEY")
 
 if not BOT_TOKEN or not DATABASE_URL or not REVELATION_KEY:
     raise RuntimeError("Missing required env vars: BOT_TOKEN, DATABASE_URL, REVELATION_KEY")
@@ -36,7 +36,7 @@ REMINDER_MESSAGES = [
     "🕊️ A nudge for QT — you got this!"
 ]
 
-# Track running state only (not persisted)
+# Track running state (not persisted)
 user_qt_done: dict[int, bool] = {}
 user_jobs: dict[int, object] = {}
 
@@ -71,14 +71,12 @@ def init_db():
     conn.close()
 
 def ensure_user_record(user_id: int, name: str):
-    """Upsert a user with defaults if not exists; keep their streaks if already present, but refresh name."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
         INSERT INTO users (user_id, name, current_streak, longest_streak, last_date)
         VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (user_id) DO UPDATE SET
-            name = EXCLUDED.name
+        ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name
     """, (str(user_id), name, 0, 0, None))
     conn.commit()
     conn.close()
@@ -89,7 +87,7 @@ def get_user(user_id: int):
     c.execute("SELECT current_streak, longest_streak, last_date, name FROM users WHERE user_id=%s", (str(user_id),))
     row = c.fetchone()
     conn.close()
-    return row  # (current, longest, last_date, name) or None
+    return row
 
 def update_user(user_id: int, name: str, streak: int, longest: int, last_date: str):
     conn = get_db_connection()
@@ -149,10 +147,10 @@ def get_all_user_ids_and_names():
     c.execute("SELECT user_id, COALESCE(name, 'friend') FROM users")
     rows = c.fetchall()
     conn.close()
-    return rows  # list of (user_id, name)
+    return rows
 
 # =============================
-# HELPERS (UI)
+# HELPERS
 # =============================
 
 def yes_no_keyboard() -> InlineKeyboardMarkup:
@@ -175,8 +173,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def leaderboard_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
 
 def _schedule_forced_reminder(user_id: int, context: ContextTypes.DEFAULT_TYPE, delay_hours: int = 1):
     _cancel_user_job(user_id)
@@ -225,7 +222,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "there"
     ensure_user_record(user_id, user_name)
-
     context.bot_data[user_id] = user_name
     user_qt_done[user_id] = user_qt_done.get(user_id, False)
 
@@ -244,43 +240,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text=question, reply_markup=yes_no_keyboard())
 
 # =============================
-# HISTORY & LEADERBOARD
-# =============================
-
-async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    rows = get_revelations(user_id)
-
-    if not rows:
-        text = "📭 You have no saved revelations yet."
-    else:
-        text_body = "\n\n".join([f"📝 {date}: {msg}" for date, msg in rows])
-        text = f"📖 Your past revelations:\n\n{text_body}"
-
-    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
-
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
-    elif update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
-
-async def allstreaks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = get_all_streaks()
-    if not rows:
-        await update.message.reply_text("📭 No streaks recorded yet.")
-        return
-
-    leaderboard = "\n".join([
-        f"{i+1}. {name or 'Unknown'} — 🔥 {streak} (Longest: {longest})"
-        for i, (name, streak, longest) in enumerate(rows)
-    ])
-    await update.message.reply_text(f"📊 Streak Leaderboard:\n\n{leaderboard}")
-
-# =============================
 # CALLBACK HANDLER
 # =============================
 
@@ -290,7 +249,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user_name = query.from_user.first_name or "Unknown"
     data = query.data
-
     ensure_user_record(user_id, user_name)
 
     if data == "yes":
@@ -310,56 +268,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             longest = max(longest, current)
         else:
             current, longest = 1, 1
-
         update_user(user_id, user_name, current, longest, today)
-        try:
-            await query.edit_message_text(
-                "Awesome 🙌 Please type your revelation for today:",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
-            )
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
+
+        await query.edit_message_text(
+            "Awesome 🙌 Please type your revelation for today:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
+        )
         return
 
     if data == "no":
         user_qt_done[user_id] = False
         _schedule_forced_reminder(user_id, context, delay_hours=1)
-        try:
-            await query.edit_message_text(
-                "⏳ Not yet? No worries — I’ll remind you in 1 hour.",
-                reply_markup=main_menu_keyboard()
-            )
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
+        await query.edit_message_text(
+            "⏳ Not yet? No worries — I’ll remind you in 1 hour.",
+            reply_markup=main_menu_keyboard()
+        )
         return
 
     if data == "history":
-        await history_cmd(update, context)
+        rows = get_revelations(user_id)
+        if not rows:
+            text = "📭 You have no saved revelations yet."
+        else:
+            text = "\n\n".join([f"📝 {date}: {msg}" for date, msg in rows])
+            text = f"📖 Your past revelations:\n\n{text}"
+        await query.edit_message_text(text, reply_markup=leaderboard_keyboard())
         return
 
     if data == "leaderboard":
         rows = get_all_streaks()
         if not rows:
-            try:
-                await query.edit_message_text("📭 No streaks recorded yet.", reply_markup=main_menu_keyboard())
-            except BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    raise
+            await query.edit_message_text("📭 No streaks recorded yet.", reply_markup=main_menu_keyboard())
             return
         leaderboard = "\n".join([
             f"{i+1}. {name or 'Unknown'} — 🔥 {streak} (Longest: {longest})"
             for i, (name, streak, longest) in enumerate(rows)
         ])
-        try:
-            await query.edit_message_text(
-                f"📊 Streak Leaderboard:\n\n{leaderboard}",
-                reply_markup=leaderboard_keyboard()
-            )
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
+        await query.edit_message_text(
+            f"📊 Streak Leaderboard:\n\n{leaderboard}",
+            reply_markup=leaderboard_keyboard()
+        )
+        return
+
+    if data == "cancelrem":
+        if _cancel_user_job(user_id):
+            msg = "🔕 Reminder cancelled."
+        else:
+            msg = "ℹ️ No reminder was set."
+        await query.edit_message_text(msg, reply_markup=main_menu_keyboard())
         return
 
     if data == "back_to_menu":
@@ -367,30 +323,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user:
             current, longest, last_date, _ = user
             msg = streak_message(current, longest)
-            text = f"🙏 Welcome back!\n{msg}"
+            await query.edit_message_text(f"🙏 Welcome back!\n{msg}", reply_markup=main_menu_keyboard())
         else:
-            text = "🙏 Welcome back!"
-        try:
-            await query.edit_message_text(text, reply_markup=main_menu_keyboard())
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
-        return
-
-    if data == "cancelrem":
-        if _cancel_user_job(user_id):
-            new_text = "🔕 Reminder cancelled."
-        else:
-            new_text = "ℹ️ No reminder was set."
-        try:
-            await query.edit_message_text(new_text, reply_markup=main_menu_keyboard())
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
-        return
+            await query.edit_message_text("🙏 Welcome back!", reply_markup=main_menu_keyboard())
 
 # =============================
-# MESSAGE HANDLER (UPDATED)
+# MESSAGE HANDLER
 # =============================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -401,28 +339,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     today = datetime.now(sg_timezone).strftime("%d/%m/%y")
 
-    if user_qt_done.get(user_id, False):
-        user = get_user(user_id)
-        if user:
-            current, longest, last_date, _ = user
+    user = get_user(user_id)
+    if user:
+        current, longest, last_date, _ = user
 
-            # ✅ If streak was reset (0) but it's a new day, start back at 1
-            if current == 0 and last_date != today:
-                current = 1
-                longest = max(longest, current)
-                update_user(user_id, user_name, current, longest, today)
+        # If streak reset overnight, restart it automatically when user sends revelation
+        if current == 0 and last_date != today:
+            current = 1
+            longest = max(longest, current)
+            update_user(user_id, user_name, current, longest, today)
 
-        add_revelation(user_id, today, text)
-
-        user = get_user(user_id)
-        if user:
-            current, longest, last_date, _ = user
-            msg = streak_message(current, longest)
-            await update.message.reply_text(f"🙏 Revelation saved!\n{msg}", reply_markup=main_menu_keyboard())
-        else:
-            await update.message.reply_text("🙏 Revelation saved!", reply_markup=main_menu_keyboard())
+    add_revelation(user_id, today, text)
+    user = get_user(user_id)
+    if user:
+        current, longest, last_date, _ = user
+        msg = streak_message(current, longest)
+        await update.message.reply_text(f"🙏 Revelation saved!\n{msg}", reply_markup=main_menu_keyboard())
     else:
-        await update.message.reply_text("Please choose an option below:", reply_markup=yes_no_keyboard())
+        await update.message.reply_text("🙏 Revelation saved!", reply_markup=main_menu_keyboard())
 
 # =============================
 # JOBS
@@ -441,8 +375,8 @@ async def reminder_job_once(context: ContextTypes.DEFAULT_TYPE):
 async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now(sg_timezone).strftime("%d/%m/%y")
     yesterday = (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y")
-
     users = get_all_user_ids_and_names()
+
     for user_id_str, name in users:
         uid = int(user_id_str)
         row = get_user(uid)
@@ -451,7 +385,7 @@ async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
         current, longest, last_date, _ = row
 
         if last_date != yesterday:
-            if current and current > 0:
+            if current > 0:
                 update_user(uid, name, 0, longest, last_date)
                 try:
                     await context.bot.send_message(
@@ -484,26 +418,25 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("history", history_cmd))
-    app.add_handler(CommandHandler("allstreaks", allstreaks_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     singapore_tz = pytz.timezone("Asia/Singapore")
 
+    # Midnight streak check
     app.job_queue.run_daily(
         nightly_reset_job,
-        time=time(hour=11, minute=25, tzinfo=singapore_tz),
+        time=time(hour=0, minute=0, tzinfo=singapore_tz),
         name="nightly_reset_job"
     )
-
+    # Daily reminder
     app.job_queue.run_daily(
         nightly_21_check,
-        time=time(hour=11, minute=23, tzinfo=singapore_tz),
+        time=time(hour=21, minute=0, tzinfo=singapore_tz),
         name="nightly_21_check"
     )
 
-    print("🤖 ZN3 PrayerBot running on Railway (Postgres + Encrypted Revelations + midnight reset + auto-1 restart after 00:00 + 21:00 reminder)…")
+    print("🤖 ZN3 PrayerBot running on Railway (Postgres + Encrypted Revelations + streak restore + midnight reset + 21:00 reminder)…")
     app.run_polling()
 
 if __name__ == "__main__":
