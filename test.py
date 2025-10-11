@@ -506,7 +506,7 @@ def main():
     # 00:00 — streak break check & friendly reminder
     app.job_queue.run_daily(
         nightly_reset_job,
-        time=time(hour=0, minute=0, tzinfo=singapore_tz),
+        time=time(hour=11, minute=4, tzinfo=singapore_tz),
         name="nightly_reset_job"
     )
     # 21:00 — daily check-in
