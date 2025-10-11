@@ -188,6 +188,15 @@ def menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
     ])
 
+def reminder_keyboard() -> InlineKeyboardMarkup:
+    """Shown when QT reminder message is sent."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yes", callback_data="reminder_yes"),
+            InlineKeyboardButton("❌ No", callback_data="reminder_no")
+        ]
+    ])
+
 def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
 
@@ -245,12 +254,9 @@ async def nudge_job_once(context: ContextTypes.DEFAULT_TYPE):
         return
     msg = random.choice(REMINDER_MESSAGES)
     try:
-        await context.bot.send_message(chat_id=user_id, text=msg, reply_markup=menu_keyboard())
+        await context.bot.send_message(chat_id=user_id, text=msg, reply_markup=reminder_keyboard())
     except Exception:
         pass
-    if not user_qt_done.get(user_id, False):
-        fj = context.job_queue.run_once(reminder_followup, when=timedelta(hours=1), chat_id=user_id, name=f"followup_{user_id}")
-        followup_jobs[user_id] = fj
     data = getattr(context.job, "data", {}) or {}
     hour, minute = data.get("hour"), data.get("minute")
     if hour is not None and minute is not None:
@@ -314,6 +320,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_record(uid, name)
     data = q.data
 
+    # --- New reminder Yes/No logic ---
+    if data == "reminder_yes":
+        today = datetime.now(SGT).strftime("%d/%m/%y")
+        row = get_user(uid)
+        current, longest, last_date, _, _, _ = row or (0, 0, None, None, None, None)
+        if last_date == today:
+            pass
+        elif last_date == (datetime.now(SGT) - timedelta(days=1)).strftime("%d/%m/%y"):
+            current += 1
+        else:
+            current = 1
+        longest = max(longest, current)
+        update_user(uid, name, current, longest, today)
+        user_qt_done[uid] = True
+        await q.edit_message_text("Awesome 🙌 Please type your revelation for today:", reply_markup=back_keyboard())
+        return
+
+    if data == "reminder_no":
+        await q.edit_message_text("Got it! I’ll remind you again in an hour ⏰", reply_markup=back_keyboard())
+        job = context.job_queue.run_once(reminder_followup, when=timedelta(hours=1), chat_id=uid, name=f"followup_{uid}")
+        followup_jobs[uid] = job
+        return
+
     if data == "cancel_today":
         cancel_user_jobs(uid)
         user_cancelled_today[uid] = True
@@ -374,7 +403,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_record(uid, name)
     text = (update.message.text or "").strip()
 
-    # Reminder time input
     if uid in awaiting_reminder_input:
         parts = text.split(":")
         if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
@@ -390,7 +418,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Reminder updated!\n🔔 Daily reminder set for {h:02d}:{m:02d}.", reply_markup=back_keyboard())
         return
 
-    # Revelation
     if user_qt_done.get(uid, False):
         today = datetime.now(SGT).strftime("%d/%m/%y")
         add_revelation(uid, today, text)
@@ -416,7 +443,7 @@ def main():
     for uid, _, rh, rm in get_all_for_schedule():
         if rh is not None and rm is not None:
             schedule_user_reminder(app, uid, rh, rm)
-    print("🤖 ZN3 PrayerBot running with Cancel Today’s Reminder feature…")
+    print("🤖 ZN3 PrayerBot running with Yes/No Reminder feature…")
     app.run_polling()
 
 if __name__ == "__main__":
