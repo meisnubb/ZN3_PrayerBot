@@ -38,12 +38,11 @@ REMINDER_MESSAGES = [
 
 user_qt_done: dict[int, bool] = {}
 user_jobs: dict[int, object] = {}
-user_waiting_for_time: dict[int, bool] = {}  # track who is setting a time
+user_waiting_for_time: dict[int, bool] = {}  # track if user is setting reminder time
 
 # =============================
 # DATABASE
 # =============================
-
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -77,16 +76,20 @@ def ensure_user_record(user_id: int, name: str):
     c = conn.cursor()
     c.execute("""
         INSERT INTO users (user_id, name, current_streak, longest_streak, last_date)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name
-    """, (str(user_id), name, 0, 0, None))
+        VALUES (%s, %s, 0, 0, NULL)
+        ON CONFLICT (user_id) DO UPDATE SET
+            name = EXCLUDED.name
+    """, (str(user_id), name))
     conn.commit()
     conn.close()
 
 def get_user(user_id: int):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT current_streak, longest_streak, last_date, name, reminder_hour, reminder_minute FROM users WHERE user_id=%s", (str(user_id),))
+    c.execute("""
+        SELECT current_streak, longest_streak, last_date, name, reminder_hour, reminder_minute
+        FROM users WHERE user_id=%s
+    """, (str(user_id),))
     row = c.fetchone()
     conn.close()
     return row
@@ -95,24 +98,33 @@ def update_user(user_id: int, name: str, streak: int, longest: int, last_date: s
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
-    INSERT INTO users (user_id, name, current_streak, longest_streak, last_date)
-    VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT (user_id) DO UPDATE SET
-      name = EXCLUDED.name,
-      current_streak = EXCLUDED.current_streak,
-      longest_streak = EXCLUDED.longest_streak,
-      last_date = EXCLUDED.last_date
+        INSERT INTO users (user_id, name, current_streak, longest_streak, last_date)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET
+          name = EXCLUDED.name,
+          current_streak = EXCLUDED.current_streak,
+          longest_streak = EXCLUDED.longest_streak,
+          last_date = EXCLUDED.last_date
     """, (str(user_id), name, streak, longest, last_date))
     conn.commit()
     conn.close()
 
-def update_user_reminder_time(user_id: int, hour: int, minute: int):
+def update_user_reminder(user_id: int, hour: int, minute: int):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE users SET reminder_hour=%s, reminder_minute=%s WHERE user_id=%s",
-              (hour, minute, str(user_id)))
+    c.execute("""
+        UPDATE users SET reminder_hour=%s, reminder_minute=%s WHERE user_id=%s
+    """, (hour, minute, str(user_id)))
     conn.commit()
     conn.close()
+
+def get_all_user_ids_and_names():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT user_id, COALESCE(name, 'friend'), reminder_hour, reminder_minute FROM users")
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 def add_revelation(user_id: int, date: str, text: str):
     encrypted_text = fernet.encrypt(text.encode()).decode()
@@ -130,31 +142,19 @@ def get_revelations(user_id: int):
     rows = c.fetchall()
     conn.close()
 
-    decrypted_rows = []
+    decrypted = []
     for date, encrypted_text in rows:
         try:
-            decrypted_text = fernet.decrypt(encrypted_text.encode()).decode()
+            text = fernet.decrypt(encrypted_text.encode()).decode()
         except Exception:
-            decrypted_text = "⚠️ Unable to decrypt (corrupted entry)"
-        decrypted_rows.append((date, decrypted_text))
-    return decrypted_rows
+            text = "⚠️ Unable to decrypt (corrupted entry)"
+        decrypted.append((date, text))
+    return decrypted
 
 def get_all_streaks():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("""
-        SELECT name, current_streak, longest_streak
-        FROM users
-        ORDER BY current_streak DESC, longest_streak DESC, COALESCE(name, '') ASC
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_all_user_ids_and_names():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT user_id, COALESCE(name, 'friend'), reminder_hour, reminder_minute FROM users")
+    c.execute("SELECT name, current_streak, longest_streak FROM users ORDER BY current_streak DESC, longest_streak DESC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -162,173 +162,98 @@ def get_all_user_ids_and_names():
 # =============================
 # HELPERS
 # =============================
+def yes_no_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Yes", callback_data="yes"), InlineKeyboardButton("❌ No", callback_data="no")]
+    ])
 
-def yes_no_keyboard():
-    keyboard = [[
-        InlineKeyboardButton("✅ Yes", callback_data="yes"),
-        InlineKeyboardButton("❌ No", callback_data="no")
-    ]]
-    return InlineKeyboardMarkup(keyboard)
-
-def main_menu_keyboard():
-    keyboard = [[
-        InlineKeyboardButton("✅ Mark QT Done", callback_data="yes"),
-        InlineKeyboardButton("❌ Not Yet", callback_data="no"),
-    ],[
-        InlineKeyboardButton("📖 View History", callback_data="history"),
-        InlineKeyboardButton("🔕 Cancel Reminder", callback_data="cancelrem"),
-    ],[
-        InlineKeyboardButton("🕒 Set Reminder Time", callback_data="settime"),
-        InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard"),
-    ]]
-    return InlineKeyboardMarkup(keyboard)
-
-def _schedule_personal_reminder(user_id: int, hour: int, minute: int, context: ContextTypes.DEFAULT_TYPE):
-    """Schedules daily reminder for specific user."""
-    _cancel_user_job(user_id)
-    singapore_tz = pytz.timezone("Asia/Singapore")
-    job_time = time(hour=hour, minute=minute, tzinfo=singapore_tz)
-    job = context.job_queue.run_daily(
-        send_daily_check,
-        time=job_time,
-        chat_id=user_id,
-        name=f"user_daily_reminder_{user_id}",
-        data={"user_id": user_id}
-    )
-    user_jobs[user_id] = job
-
-def _cancel_user_job(user_id: int) -> bool:
-    job = user_jobs.pop(user_id, None)
-    if job:
-        job.schedule_removal()
-        return True
-    return False
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Mark QT Done", callback_data="yes"),
+         InlineKeyboardButton("❌ Not Yet", callback_data="no")],
+        [InlineKeyboardButton("📖 View History", callback_data="history"),
+         InlineKeyboardButton("⏰ Set Reminder", callback_data="set_reminder")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
+    ])
 
 def streak_visual(streak: int) -> str:
-    total = 7
-    remainder = streak % total
+    remainder = streak % 7 if streak else 0
     if remainder == 0 and streak > 0:
         remainder = 7
-    return "🔥" * remainder + "⚪" * (total - remainder)
+    return "🔥" * remainder + "⚪" * (7 - remainder)
 
 def streak_message(current: int, longest: int) -> str:
     msg = f"{streak_visual(current)}\nCurrent streak: {current} days\nLongest streak: {longest} days"
-    if current == 5:
-        msg += "\n🌟 Congrats on 5 days!"
-    elif current == 7:
-        msg += "\n💪 One full week!"
-    elif current == 30:
-        msg += "\n🏆 A whole month!"
-    elif current == 100:
-        msg += "\n👑 Incredible! 100 days!"
     return msg
 
 # =============================
 # COMMANDS
 # =============================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "there"
     ensure_user_record(user_id, user_name)
+
     context.bot_data[user_id] = user_name
     user_qt_done[user_id] = user_qt_done.get(user_id, False)
 
-    await update.message.reply_text(
-        f"Hello {user_name}! 🙌\nI’m **ZN3 PrayerBot**.\nLet’s grow together in faith 🙏",
-        parse_mode="Markdown"
-    )
-    await update.message.reply_text(
-        f"Have you done your QT today?",
-        reply_markup=yes_no_keyboard()
-    )
+    intro = f"Hello {user_name}! 🙌\nI’m **ZN3 PrayerBot**.\nLet’s grow together in our commitment and faith 🙏👋"
+    await update.message.reply_text(intro, parse_mode="Markdown")
+    await update.message.reply_text(f"Have you done your QT today?", reply_markup=yes_no_keyboard())
 
 # =============================
-# CALLBACK HANDLER
+# CUSTOM REMINDER HANDLER
 # =============================
+async def prompt_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.callback_query.from_user.id
+    user_waiting_for_time[user_id] = True
+    await update.callback_query.edit_message_text(
+        "🕓 Please send your preferred reminder time in 24-hour format.\n"
+        "Example: 08:00 or 21:15\n⚠️ Must be before 23:30."
+    )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    user_name = query.from_user.first_name or "Unknown"
-    data = query.data
-
-    ensure_user_record(user_id, user_name)
-
-    if data == "settime":
-        user_waiting_for_time[user_id] = True
-        await query.edit_message_text(
-            "🕒 Please send your preferred reminder time in *24-hour format* (e.g., 08:00 or 21:15).\n"
-            "⚠️ Must be before 23:30.",
-            parse_mode="Markdown"
-        )
-        return
-
-    if data == "leaderboard":
-        rows = get_all_streaks()
-        if not rows:
-            await query.edit_message_text("📭 No streaks recorded yet.", reply_markup=main_menu_keyboard())
-            return
-        leaderboard = "\n".join([
-            f"{i+1}. {name or 'Unknown'} — 🔥 {streak} (Longest: {longest})"
-            for i, (name, streak, longest) in enumerate(rows)
-        ])
-        await query.edit_message_text(
-            f"📊 Streak Leaderboard:\n\n{leaderboard}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
-        )
-        return
-
-    if data == "yes":
-        user_qt_done[user_id] = True
-        today = datetime.now(sg_timezone).strftime("%d/%m/%y")
-        user = get_user(user_id)
-        if user:
-            current, longest, last_date, _, _, _ = user
-            if last_date == today:
-                pass
-            elif last_date == (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y"):
-                current += 1
-            else:
-                current = 1
-            longest = max(longest, current)
-        else:
-            current, longest = 1, 1
-        update_user(user_id, user_name, current, longest, today)
-        await query.edit_message_text(
-            "Awesome 🙌 Please type your revelation for today:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
-        )
-        return
-
-    if data == "back_to_menu":
-        await query.edit_message_text("🙏 Welcome back!", reply_markup=main_menu_keyboard())
-        return
+def smart_parse_time(text: str):
+    text = text.strip().replace(".", ":")
+    if ":" not in text:
+        if len(text) <= 2:
+            return int(text), 0
+        elif len(text) == 3:
+            return int(text[0]), int(text[1:])
+        elif len(text) == 4:
+            return int(text[:2]), int(text[2:])
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ValueError
+    hour = int(parts[0])
+    minute = int(parts[1])
+    return hour, minute
 
 # =============================
 # MESSAGE HANDLER
 # =============================
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = (update.message.text or "").strip()
 
-    if user_waiting_for_time.get(user_id):
+    # handle reminder time input
+    if user_waiting_for_time.get(user_id, False):
         try:
-            hour, minute = map(int, text.split(":"))
-            if hour > 23 or minute > 59:
+            hour, minute = smart_parse_time(text)
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
                 raise ValueError
-            if (hour, minute) > (23, 30):
-                await update.message.reply_text("⚠️ Time must be before 23:30. Try again.")
+            if hour == 23 and minute > 30:
+                await update.message.reply_text("⚠️ Time must be before 23:30.")
                 return
-            update_user_reminder_time(user_id, hour, minute)
-            _schedule_personal_reminder(user_id, hour, minute, context)
+            update_user_reminder(user_id, hour, minute)
             user_waiting_for_time[user_id] = False
-            await update.message.reply_text(f"✅ Reminder time set to {hour:02d}:{minute:02d} daily!", reply_markup=main_menu_keyboard())
+            await update.message.reply_text(f"✅ Reminder set for {hour:02d}:{minute:02d} daily.")
         except Exception:
-            await update.message.reply_text("❌ Invalid time format. Use HH:MM (e.g., 08:00 or 21:15).")
+            await update.message.reply_text("❌ Invalid time format. Try again (e.g., 08:00 or 21:15).")
         return
+
+    # handle revelation input
+    user_name = update.effective_user.first_name or "Unknown"
+    ensure_user_record(user_id, user_name)
 
     if user_qt_done.get(user_id, False):
         today = datetime.now(sg_timezone).strftime("%d/%m/%y")
@@ -341,41 +266,73 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please choose an option below:", reply_markup=yes_no_keyboard())
 
 # =============================
+# CALLBACK HANDLER
+# =============================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    user_name = q.from_user.first_name or "Unknown"
+    data = q.data
+    ensure_user_record(user_id, user_name)
+
+    if data == "set_reminder":
+        await prompt_reminder_time(update, context)
+        return
+
+    if data == "yes":
+        user_qt_done[user_id] = True
+        today = datetime.now(sg_timezone).strftime("%d/%m/%y")
+        user = get_user(user_id)
+        if user:
+            current, longest, last_date, _, _, _ = user
+            if last_date != today:
+                if last_date == (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y"):
+                    current += 1
+                else:
+                    current = 1
+                longest = max(longest, current)
+            update_user(user_id, user_name, current, longest, today)
+        else:
+            update_user(user_id, user_name, 1, 1, today)
+        await q.edit_message_text("Awesome 🙌 Please type your revelation for today:")
+        return
+
+    if data == "no":
+        user_qt_done[user_id] = False
+        await q.edit_message_text("⏳ No worries — take your time. I’ll check in later.", reply_markup=main_menu_keyboard())
+        return
+
+    if data == "leaderboard":
+        rows = get_all_streaks()
+        text = "\n".join([f"{i+1}. {n or 'Unknown'} — 🔥 {s} (Longest: {l})" for i,(n,s,l) in enumerate(rows)])
+        await q.edit_message_text(f"📊 Leaderboard:\n\n{text}", reply_markup=main_menu_keyboard())
+        return
+
+# =============================
 # JOBS
 # =============================
-
-async def send_daily_check(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id = job.chat_id
-    name = context.bot_data.get(user_id, "friend")
-    user_qt_done[user_id] = False
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"🌙 Hello {name}, have you done your QT today?",
-        reply_markup=yes_no_keyboard()
-    )
+async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.chat_id
+    msg = random.choice(REMINDER_MESSAGES)
+    await context.bot.send_message(chat_id=user_id, text=msg, reply_markup=main_menu_keyboard())
 
 async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now(sg_timezone).strftime("%d/%m/%y")
     yesterday = (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y")
-    users = get_all_user_ids_and_names()
-    for user_id_str, name, _, _ in users:
+
+    for user_id_str, name, _, _ in get_all_user_ids_and_names():
         uid = int(user_id_str)
-        row = get_user(uid)
-        if not row:
-            continue
-        current, longest, last_date, *_ = row
+        user = get_user(uid)
+        if not user: continue
+        current, longest, last_date, *_ = user
         if last_date != yesterday and current > 0:
             update_user(uid, name, 0, longest, last_date)
-            await context.bot.send_message(
-                chat_id=uid,
-                text="New day, new start 🌅 Your streak reset overnight, but it’s never too late to build it back up. You got this! 💯🔥"
-            )
+            await context.bot.send_message(uid, "New day, new start 🌅 Your streak reset overnight. You got this! 💯🔥")
 
 # =============================
 # MAIN
 # =============================
-
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
@@ -386,14 +343,14 @@ def main():
 
     singapore_tz = pytz.timezone("Asia/Singapore")
 
-    # Midnight streak reset
-    app.job_queue.run_daily(
-        nightly_reset_job,
-        time=time(hour=0, minute=0, tzinfo=singapore_tz),
-        name="nightly_reset_job"
-    )
+    # midnight reset
+    app.job_queue.run_daily(nightly_reset_job, time=time(hour=0, minute=0, tzinfo=singapore_tz))
 
-    print("🤖 ZN3 PrayerBot running with custom reminder times + encrypted revelations + streak logic intact…")
+    # reschedule per-user reminders from DB
+    for uid, _, hour, minute in get_all_user_ids_and_names():
+        app.job_queue.run_daily(reminder_job, time=time(hour=hour, minute=minute, tzinfo=singapore_tz), chat_id=int(uid))
+
+    print("🤖 ZN3 PrayerBot running on Railway (custom reminders + midnight reset + encryption + smart time parser)…")
     app.run_polling()
 
 if __name__ == "__main__":
