@@ -208,9 +208,27 @@ def streak_visual(streak: int) -> str:
     return "🔥" * r + "⚪" * (total - r)
 
 def streak_message_block(current: int, longest: int, reminder_h: int | None, reminder_m: int | None) -> str:
-    lines = [f"🙏 Welcome back!", f"{streak_visual(current)}", f"Current streak: {current} days", f"Longest streak: {longest} days"]
+    lines = [
+        "🙏 Welcome back!",
+        f"{streak_visual(current)}",
+        f"Current streak: {current} days",
+        f"Longest streak: {longest} days"
+    ]
     if reminder_h is not None and reminder_m is not None:
         lines.insert(1, f"🔔 Daily reminder set for {reminder_h:02d}:{reminder_m:02d}")
+
+    # 🎯 milestone message additions
+    if current == 5:
+        lines.append("🌟 Congrats on 5 days!")
+    elif current == 7:
+        lines.append("💪 One full week!")
+    elif current == 30:
+        lines.append("🎉 A whole month!")
+    elif current == 100:
+        lines.append("👑 Incredible! 100 days!")
+    elif current == 365:
+        lines.append("👑 WOW U DID NOT MISS QT FOR A WHOLE YEAR")
+
     return "\n".join(lines)
 
 def friendly_error_format() -> str:
