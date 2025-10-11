@@ -197,7 +197,6 @@ def _cancel_user_job(user_id: int) -> bool:
     return False
 
 def streak_visual(streak: int) -> str:
-    """7-day cycle visual: 🔥 repeats up to 7, then wraps; numbers keep counting."""
     total = 7
     remainder = streak % total
     if remainder == 0 and streak > 0:
@@ -227,7 +226,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "there"
     ensure_user_record(user_id, user_name)
 
-    # Track name in memory for this instance (used in 21:00 reminders fallback)
     context.bot_data[user_id] = user_name
     user_qt_done[user_id] = user_qt_done.get(user_id, False)
 
@@ -244,6 +242,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await context.bot.send_message(chat_id=user_id, text=intro, parse_mode="Markdown")
         await context.bot.send_message(chat_id=user_id, text=question, reply_markup=yes_no_keyboard())
+
+# =============================
+# HISTORY & LEADERBOARD
+# =============================
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -289,7 +291,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = query.from_user.first_name or "Unknown"
     data = query.data
 
-    # keep record fresh
     ensure_user_record(user_id, user_name)
 
     if data == "yes":
@@ -297,11 +298,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _cancel_user_job(user_id)
 
         today = datetime.now(sg_timezone).strftime("%d/%m/%y")
-        user = get_user(user_id)  # (current, longest, last_date, name)
+        user = get_user(user_id)
         if user:
             current, longest, last_date, _ = user
             if last_date == today:
-                pass  # already counted today
+                pass
             elif last_date == (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y"):
                 current += 1
             else:
@@ -311,7 +312,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current, longest = 1, 1
 
         update_user(user_id, user_name, current, longest, today)
-
         try:
             await query.edit_message_text(
                 "Awesome 🙌 Please type your revelation for today:",
@@ -362,15 +362,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise
         return
 
-    if data == "back":
-        # legacy back -> just show question
-        try:
-            await query.edit_message_text("Have you done your QT today?", reply_markup=yes_no_keyboard())
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise
-        return
-
     if data == "back_to_menu":
         user = get_user(user_id)
         if user:
@@ -399,7 +390,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # =============================
-# MESSAGE HANDLER
+# MESSAGE HANDLER (UPDATED)
 # =============================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -408,9 +399,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_record(user_id, user_name)
 
     text = (update.message.text or "").strip()
+    today = datetime.now(sg_timezone).strftime("%d/%m/%y")
 
     if user_qt_done.get(user_id, False):
-        today = datetime.now(sg_timezone).strftime("%d/%m/%y")
+        user = get_user(user_id)
+        if user:
+            current, longest, last_date, _ = user
+
+            # ✅ If streak was reset (0) but it's a new day, start back at 1
+            if current == 0 and last_date != today:
+                current = 1
+                longest = max(longest, current)
+                update_user(user_id, user_name, current, longest, today)
+
         add_revelation(user_id, today, text)
 
         user = get_user(user_id)
@@ -438,9 +439,6 @@ async def reminder_job_once(context: ContextTypes.DEFAULT_TYPE):
     user_jobs.pop(user_id, None)
 
 async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs at 00:00 SGT. If user didn't do QT 'yesterday', reset streak to 0 and notify kindly.
-    """
     today = datetime.now(sg_timezone).strftime("%d/%m/%y")
     yesterday = (datetime.now(sg_timezone) - timedelta(days=1)).strftime("%d/%m/%y")
 
@@ -452,11 +450,8 @@ async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
             continue
         current, longest, last_date, _ = row
 
-        # If they didn't complete QT yesterday, reset at midnight
         if last_date != yesterday:
-            # Only send a message if the streak was non-zero or we want to nudge anyway
             if current and current > 0:
-                # Reset to zero
                 update_user(uid, name, 0, longest, last_date)
                 try:
                     await context.bot.send_message(
@@ -464,16 +459,12 @@ async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
                         text="New day, new start 🌅 Your streak reset overnight, but it’s never too late to build it back up. You got this! 💯🔥"
                     )
                 except Exception:
-                    pass  # ignore DM errors (user blocked bot etc.)
+                    pass
 
 async def nightly_21_check(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs at 21:00 SGT. Sends the daily check-in and schedules a 1-hour reminder if they tap 'No'.
-    """
     users = get_all_user_ids_and_names()
     for user_id_str, name in users:
         uid = int(user_id_str)
-        # mark today's state as "not done yet" for this runtime
         user_qt_done[uid] = False
         try:
             await context.bot.send_message(
@@ -483,7 +474,6 @@ async def nightly_21_check(context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        # Job for 1-hour follow up is only scheduled if they press "No"
 
 # =============================
 # MAIN
@@ -493,30 +483,27 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("allstreaks", allstreaks_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Scheduled jobs (SGT)
     singapore_tz = pytz.timezone("Asia/Singapore")
 
-    # 00:00 — streak break check & friendly reminder
     app.job_queue.run_daily(
         nightly_reset_job,
-        time=time(hour=11, minute=4, tzinfo=singapore_tz),
+        time=time(hour=11, minute=16, tzinfo=singapore_tz),
         name="nightly_reset_job"
     )
-    # 21:00 — daily check-in
+
     app.job_queue.run_daily(
         nightly_21_check,
-        time=time(hour=21, minute=0, tzinfo=singapore_tz),
+        time=time(hour=11, minute=14, tzinfo=singapore_tz),
         name="nightly_21_check"
     )
 
-    print("🤖 ZN3 PrayerBot running on Railway (Postgres + Encrypted Revelations + 7-day visual + midnight reset + 21:00 reminder)…")
+    print("🤖 ZN3 PrayerBot running on Railway (Postgres + Encrypted Revelations + midnight reset + auto-1 restart after 00:00 + 21:00 reminder)…")
     app.run_polling()
 
 if __name__ == "__main__":
