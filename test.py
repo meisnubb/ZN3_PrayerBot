@@ -4,6 +4,7 @@ import psycopg2
 from cryptography.fernet import Fernet
 from datetime import timedelta, time, datetime
 import pytz
+from calendar import month_name
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -38,7 +39,7 @@ REMINDER_MESSAGES = [
     "📿 Take a pause and connect with Him now ❤️"
 ]
 
-# Runtime memory (reset if bot restarts)
+# Runtime memory
 user_qt_done: dict[int, bool] = {}
 awaiting_reminder_input: set[int] = set()
 awaiting_revelation: set[int] = set()
@@ -55,7 +56,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    # add cancelled_date for persist-cancel-today feature
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
@@ -64,8 +64,7 @@ def init_db():
         longest_streak INTEGER,
         last_date TEXT,
         reminder_hour INTEGER,
-        reminder_minute INTEGER,
-        cancelled_date TEXT
+        reminder_minute INTEGER
     )
     """)
     c.execute("""
@@ -76,6 +75,7 @@ def init_db():
         text TEXT
     )
     """)
+    # ✅ fix: ensure column exists for old users table
     c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS cancelled_date TEXT;")
     conn.commit()
     conn.close()
@@ -153,6 +153,57 @@ def get_revelations(user_id: int):
         except Exception:
             out.append((date, "⚠️ Unable to decrypt (corrupted entry)"))
     return out
+
+# 🆕 Monthly Revelation Retrieval + Pagination
+def get_revelations_by_month(user_id: int, year: int, month: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT date, text FROM revelations WHERE user_id=%s ORDER BY id ASC", (str(user_id),))
+    rows = c.fetchall()
+    conn.close()
+
+    result = []
+    for date, enc in rows:
+        try:
+            dec = fernet.decrypt(enc.encode()).decode()
+        except Exception:
+            dec = "⚠️ Unable to decrypt (corrupted entry)"
+        try:
+            d = datetime.strptime(date, "%d/%m/%y")
+            if d.year == year and d.month == month:
+                result.append((date, dec))
+        except Exception:
+            continue
+    return result
+
+def month_history_keyboard(user_id: int, year: int, month: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT date FROM revelations WHERE user_id=%s", (str(user_id),))
+    all_dates = c.fetchall()
+    conn.close()
+
+    months = []
+    for (date_str,) in all_dates:
+        try:
+            d = datetime.strptime(date_str, "%d/%m/%y")
+            ym = (d.year, d.month)
+            if ym not in months:
+                months.append(ym)
+        except Exception:
+            continue
+    months.sort()
+
+    has_prev = any((y, m) < (year, month) for (y, m) in months)
+    has_next = any((y, m) > (year, month) for (y, m) in months)
+
+    buttons = []
+    if has_prev:
+        buttons.append(InlineKeyboardButton("◀️", callback_data=f"history_prev_{year}_{month}"))
+    if has_next:
+        buttons.append(InlineKeyboardButton("▶️", callback_data=f"history_next_{year}_{month}"))
+
+    return InlineKeyboardMarkup([buttons] + [[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]]) if buttons else InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="back_to_menu")]])
 
 def get_all_for_schedule():
     conn = get_db_connection()
@@ -258,7 +309,6 @@ async def nudge_job_once(context: ContextTypes.DEFAULT_TYPE):
     cancelled_date = row[6]
     today = datetime.now(SGT).strftime("%d/%m/%y")
 
-    # Skip today's reminder but still reschedule tomorrow
     if cancelled_date == today:
         data = getattr(context.job, "data", {}) or {}
         if data.get("hour") is not None:
@@ -298,14 +348,12 @@ async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
         if not row:
             continue
         current, longest, last_date, name, _, _, cancelled_date = row
-        # reset streak if missed yesterday
         if last_date != yesterday and current > 0:
             update_user(uid, name or "friend", 0, longest, last_date)
             try:
                 await context.bot.send_message(chat_id=uid, text="🌅 New day, new start! Your streak reset overnight. You got this! 💪")
             except Exception:
                 pass
-        # clear cancelled_date daily
         if cancelled_date == today:
             set_user_cancelled_today(uid, None)
 
@@ -350,11 +398,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🔕 You’ve cancelled reminders for today. See you tomorrow!", reply_markup=back_keyboard())
         return
 
+    # 🆕 Month-based history view
     if data == "history":
-        rows = get_revelations(uid)
-        text = "📭 No saved revelations yet." if not rows else "📖 Your past revelations:\n\n" + "\n\n".join(
-            [f"📝 {d}: {t}" for d, t in rows])
-        await q.edit_message_text(text, reply_markup=back_keyboard())
+        now = datetime.now(SGT)
+        year, month = now.year, now.month
+        rows = get_revelations_by_month(uid, year, month)
+        title = f"📖 {month_name[month]} {year}"
+        text = f"{title}\n\n" + ("\n\n".join([f"📝 {d}: {t}" for d, t in rows]) if rows else "📭 No entries this month.")
+        await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
+        return
+
+    if data.startswith("history_prev_") or data.startswith("history_next_"):
+        parts = data.split("_")
+        direction, year, month = parts[1], int(parts[2]), int(parts[3])
+        if direction == "prev":
+            month -= 1
+            if month == 0:
+                month = 12
+                year -= 1
+        else:
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
+        rows = get_revelations_by_month(uid, year, month)
+        title = f"📖 {month_name[month]} {year}"
+        text = f"{title}\n\n" + ("\n\n".join([f"📝 {d}: {t}" for d, t in rows]) if rows else "📭 No entries this month.")
+        await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
         return
 
     if data == "setrem":
@@ -369,7 +439,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "back_to_menu":
-        # exit revelation mode
         awaiting_revelation.discard(uid)
         awaiting_reminder_input.discard(uid)
         row = get_user(uid)
@@ -382,7 +451,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_record(uid, name)
     text = (update.message.text or "").strip()
 
-    # set reminder
     if uid in awaiting_reminder_input:
         parts = text.split(":")
         if len(parts) != 2 or not all(p.isdigit() for p in parts):
@@ -398,7 +466,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Reminder set for {h:02d}:{m:02d}.", reply_markup=back_keyboard())
         return
 
-    # revelation logic
     if uid in awaiting_revelation:
         today = datetime.now(SGT).strftime("%d/%m/%y")
         row = get_user(uid)
@@ -415,7 +482,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         awaiting_revelation.discard(uid)
         user_qt_done[uid] = True
 
-        # cancel any pending follow-up
         safe_cancel(followup_jobs.get(uid))
         followup_jobs.pop(uid, None)
 
@@ -439,7 +505,7 @@ def main():
     app.job_queue.run_daily(nightly_reset_job, time=time(hour=0, minute=5, tzinfo=SGT))
     for uid, _, rh, rm in get_all_for_schedule():
         schedule_user_reminder(app, uid, rh, rm)
-    print("🤖 ZN3 PrayerBot running (stable, with fixed cancel-today + back + follow-up + persist)…")
+    print("🤖 ZN3 PrayerBot running (stable, with monthly history + fixed cancel-today + back + follow-up + persist)…")
     app.run_polling()
 
 if __name__ == "__main__":
