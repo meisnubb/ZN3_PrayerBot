@@ -76,6 +76,7 @@ def init_db():
         text TEXT
     )
     """)
+    c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS cancelled_date TEXT;")
     conn.commit()
     conn.close()
 
