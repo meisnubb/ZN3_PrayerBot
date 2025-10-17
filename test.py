@@ -434,10 +434,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "leaderboard":
         rows = get_all_streaks()
-        text = "📊 Leaderboard:\n\n" + "\n".join([f"{i+1}. {n} — 🔥 {s} (Longest: {l})" for i, (n, s, l) in enumerate(rows)]) if rows else "📭 No data yet."
+        if not rows:
+            await q.edit_message_text("📭 No data yet.", reply_markup=back_keyboard())
+            return
+
+        medals = ["🥇", "🥈", "🥉"]
+        lines = ["📊 Leaderboard:\n"]
+        for i, (n, s, l) in enumerate(rows):
+            if i < 3:
+                rank_display = medals[i]
+            else:
+                rank_display = f"{i + 1}."
+            lines.append(f"{rank_display} {n} — 🔥 {s} (Longest: {l})")
+
+        text = "\n".join(lines)
         await q.edit_message_text(text, reply_markup=back_keyboard())
         return
-
     if data == "back_to_menu":
         awaiting_revelation.discard(uid)
         awaiting_reminder_input.discard(uid)
