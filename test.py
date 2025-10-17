@@ -44,7 +44,6 @@ awaiting_reminder_input: set[int] = set()
 awaiting_revelation: set[int] = set()
 daily_jobs: dict[int, object] = {}
 followup_jobs: dict[int, object] = {}
-user_cancelled_today: dict[int, bool] = {}
 
 # =============================
 # DATABASE
@@ -56,6 +55,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
+    # add cancelled_date for persist-cancel-today feature
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
@@ -64,7 +64,8 @@ def init_db():
         longest_streak INTEGER,
         last_date TEXT,
         reminder_hour INTEGER,
-        reminder_minute INTEGER
+        reminder_minute INTEGER,
+        cancelled_date TEXT
     )
     """)
     c.execute("""
@@ -81,12 +82,11 @@ def init_db():
 def ensure_user_record(user_id: int, name: str):
     conn = get_db_connection()
     c = conn.cursor()
-    # default reminder = 8:00 AM
     c.execute("""
-        INSERT INTO users (user_id, name, current_streak, longest_streak, last_date, reminder_hour, reminder_minute)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO users (user_id, name, current_streak, longest_streak, last_date, reminder_hour, reminder_minute, cancelled_date)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (user_id) DO NOTHING
-    """, (str(user_id), name, 0, 0, None, 8, 0))
+    """, (str(user_id), name, 0, 0, None, 8, 0, None))
     conn.commit()
     conn.close()
 
@@ -94,7 +94,7 @@ def get_user(user_id: int):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
-        SELECT current_streak, longest_streak, last_date, name, reminder_hour, reminder_minute
+        SELECT current_streak, longest_streak, last_date, name, reminder_hour, reminder_minute, cancelled_date
         FROM users WHERE user_id=%s
     """, (str(user_id),))
     row = c.fetchone()
@@ -120,6 +120,13 @@ def update_user_reminder(user_id: int, hour: int, minute: int):
     c = conn.cursor()
     c.execute("UPDATE users SET reminder_hour=%s, reminder_minute=%s WHERE user_id=%s",
               (hour, minute, str(user_id)))
+    conn.commit()
+    conn.close()
+
+def set_user_cancelled_today(user_id: int, date_str: str | None):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE users SET cancelled_date=%s WHERE user_id=%s", (date_str, str(user_id)))
     conn.commit()
     conn.close()
 
@@ -244,20 +251,32 @@ def schedule_user_reminder(app, uid: int, h: int, m: int):
 
 async def nudge_job_once(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.chat_id
-    if user_cancelled_today.get(uid, False):
+    row = get_user(uid)
+    if not row:
         return
+    cancelled_date = row[6]
+    today = datetime.now(SGT).strftime("%d/%m/%y")
+
+    # Skip today's reminder but still reschedule tomorrow
+    if cancelled_date == today:
+        data = getattr(context.job, "data", {}) or {}
+        if data.get("hour") is not None:
+            schedule_user_reminder(context.application, uid, data["hour"], data["minute"])
+        return
+
     msg = random.choice(REMINDER_MESSAGES)
     try:
         await context.bot.send_message(chat_id=uid, text=msg, reply_markup=reminder_keyboard())
     except Exception:
         pass
+
     data = getattr(context.job, "data", {}) or {}
     if data.get("hour") is not None:
         schedule_user_reminder(context.application, uid, data["hour"], data["minute"])
 
 async def reminder_followup(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.chat_id
-    if not user_qt_done.get(uid, False) and not user_cancelled_today.get(uid, False):
+    if not user_qt_done.get(uid, False):
         try:
             await context.bot.send_message(chat_id=uid, text="👋 Hello! Have you done your QT 🤨?", reply_markup=menu_keyboard())
         except Exception:
@@ -269,7 +288,6 @@ async def reminder_followup(context: ContextTypes.DEFAULT_TYPE):
 # =============================
 
 async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
-    user_cancelled_today.clear()
     awaiting_revelation.clear()
     today = datetime.now(SGT).strftime("%d/%m/%y")
     yesterday = (datetime.now(SGT) - timedelta(days=1)).strftime("%d/%m/%y")
@@ -278,13 +296,17 @@ async def nightly_reset_job(context: ContextTypes.DEFAULT_TYPE):
         row = get_user(uid)
         if not row:
             continue
-        current, longest, last_date, name, _, _ = row
+        current, longest, last_date, name, _, _, cancelled_date = row
+        # reset streak if missed yesterday
         if last_date != yesterday and current > 0:
             update_user(uid, name or "friend", 0, longest, last_date)
             try:
                 await context.bot.send_message(chat_id=uid, text="🌅 New day, new start! Your streak reset overnight. You got this! 💪")
             except Exception:
                 pass
+        # clear cancelled_date daily
+        if cancelled_date == today:
+            set_user_cancelled_today(uid, None)
 
 # =============================
 # COMMANDS & BUTTONS
@@ -295,7 +317,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "friend"
     ensure_user_record(uid, name)
     row = get_user(uid)
-    current, longest, _, _, rh, rm = row if row else (0, 0, None, None, 8, 0)
+    current, longest, _, _, rh, rm, _ = row if row else (0, 0, None, None, 8, 0, None)
     schedule_user_reminder(context.application, uid, rh or 8, rm or 0)
     await update.message.reply_text(
         f"Hello {name}! 🙌\nI’m ZN3 PrayerBot.\nLet’s grow together in faith 🙏",
@@ -322,8 +344,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "cancel_today":
-        cancel_user_jobs(uid)
-        user_cancelled_today[uid] = True
+        today = datetime.now(SGT).strftime("%d/%m/%y")
+        set_user_cancelled_today(uid, today)
         await q.edit_message_text("🔕 You’ve cancelled reminders for today. See you tomorrow!", reply_markup=back_keyboard())
         return
 
@@ -346,8 +368,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "back_to_menu":
+        # exit revelation mode
+        awaiting_revelation.discard(uid)
+        awaiting_reminder_input.discard(uid)
         row = get_user(uid)
-        current, longest, _, _, rh, rm = row if row else (0, 0, None, None, 8, 0)
+        current, longest, _, _, rh, rm, _ = row if row else (0, 0, None, None, 8, 0, None)
         await q.edit_message_text(streak_message_block(current, longest, rh, rm), reply_markup=menu_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,7 +401,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in awaiting_revelation:
         today = datetime.now(SGT).strftime("%d/%m/%y")
         row = get_user(uid)
-        current, longest, last_date, _, _, _ = row if row else (0, 0, None, None, None, None)
+        current, longest, last_date, _, _, _, _ = row if row else (0, 0, None, None, None, None, None)
         if last_date == today:
             pass
         elif last_date == (datetime.now(SGT) - timedelta(days=1)).strftime("%d/%m/%y"):
@@ -388,6 +413,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_revelation(uid, today, text)
         awaiting_revelation.discard(uid)
         user_qt_done[uid] = True
+
+        # cancel any pending follow-up
+        safe_cancel(followup_jobs.get(uid))
+        followup_jobs.pop(uid, None)
+
         row = get_user(uid)
         msg = streak_message_block(row[0], row[1], row[4], row[5])
         await update.message.reply_text(f"🙏 Revelation saved!\n{msg}", reply_markup=menu_keyboard())
@@ -408,7 +438,7 @@ def main():
     app.job_queue.run_daily(nightly_reset_job, time=time(hour=0, minute=5, tzinfo=SGT))
     for uid, _, rh, rm in get_all_for_schedule():
         schedule_user_reminder(app, uid, rh, rm)
-    print("🤖 ZN3 PrayerBot running (stable, auto-8 AM, revelation-verified)…")
+    print("🤖 ZN3 PrayerBot running (stable, with fixed cancel-today + back + follow-up + persist)…")
     app.run_polling()
 
 if __name__ == "__main__":
