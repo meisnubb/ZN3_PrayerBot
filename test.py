@@ -476,7 +476,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current += 1
         else:
             current = 1
+        current = max(1, current)
+
         longest = max(longest, current)
+        update_user(uid, name, current, longest, today)
+        add_revelation(uid, today, text)
+        awaiting_revelation.discard(uid)
+        user_qt_done[uid] = True
+
+
         update_user(uid, name, current, longest, today)
         add_revelation(uid, today, text)
         awaiting_revelation.discard(uid)
