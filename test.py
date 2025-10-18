@@ -399,13 +399,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🆕 Month-based history view
+    # 🆕 Month-based history view (now with long-message safety)
     if data == "history":
         now = datetime.now(SGT)
         year, month = now.year, now.month
         rows = get_revelations_by_month(uid, year, month)
         title = f"📖 {month_name[month]} {year}"
         text = f"{title}\n\n" + ("\n\n".join([f"📝 {d}: {t}" for d, t in rows]) if rows else "📭 No entries this month.")
-        await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
+        MAX_LEN = 4000
+
+        if len(text) > MAX_LEN:
+            # Split long text into multiple Telegram messages
+            for chunk_start in range(0, len(text), MAX_LEN):
+                await q.message.reply_text(text[chunk_start:chunk_start+MAX_LEN])
+            await q.message.reply_text("⬆️ Continued...", reply_markup=month_history_keyboard(uid, year, month))
+        else:
+            await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
         return
 
     if data.startswith("history_prev_") or data.startswith("history_next_"):
@@ -424,8 +433,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = get_revelations_by_month(uid, year, month)
         title = f"📖 {month_name[month]} {year}"
         text = f"{title}\n\n" + ("\n\n".join([f"📝 {d}: {t}" for d, t in rows]) if rows else "📭 No entries this month.")
-        await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
+        MAX_LEN = 4000
+
+        if len(text) > MAX_LEN:
+            for chunk_start in range(0, len(text), MAX_LEN):
+                await q.message.reply_text(text[chunk_start:chunk_start+MAX_LEN])
+            await q.message.reply_text("⬆️ Continued...", reply_markup=month_history_keyboard(uid, year, month))
+        else:
+            await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
         return
+
 
     if data == "setrem":
         awaiting_reminder_input.add(uid)
