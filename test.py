@@ -309,6 +309,13 @@ async def nudge_job_once(context: ContextTypes.DEFAULT_TYPE):
     cancelled_date = row[6]
     today = datetime.now(SGT).strftime("%d/%m/%y")
 
+    if row[2] == today:
+        # reschedule next day's reminder
+        data = getattr(context.job, "data", {}) or {}
+        if data.get("hour") is not None:
+            schedule_user_reminder(context.application, uid, data["hour"], data["minute"])
+        return
+
     if cancelled_date == today:
         data = getattr(context.job, "data", {}) or {}
         if data.get("hour") is not None:
