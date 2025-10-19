@@ -503,7 +503,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in awaiting_bible_search:
         ref = text.strip().replace(" ", "+")
         try:
-            response = requests.get(f"https://bible-api.com/{ref}")
+            response = requests.get(f"https://bible-api.deno.dev/{ref}?translation=kjv")
             data = response.json()
             if "verses" in data:
                 verse_text = "".join(v["text"] for v in data["verses"])
