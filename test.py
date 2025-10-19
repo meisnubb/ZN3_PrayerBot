@@ -582,7 +582,7 @@ def main():
     app.job_queue.run_daily(nightly_reset_job, time=time(hour=0, minute=5, tzinfo=SGT))
     for uid, _, rh, rm in get_all_for_schedule():
         schedule_user_reminder(app, uid, rh, rm)
-    print("🤖 ZN3 PrayerBot running (stable, with monthly history + fixed cancel-today + back + follow-up + persist)…")
+    print("🤖 ZN3 PrayerBot running (stable, with monthly history + fixed cancel-today + back + follow-up + persist+ bible search)…")
     app.run_polling()
 
 if __name__ == "__main__":
