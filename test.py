@@ -7,6 +7,7 @@ import pytz
 from calendar import month_name
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
+import requests
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -43,6 +44,7 @@ REMINDER_MESSAGES = [
 user_qt_done: dict[int, bool] = {}
 awaiting_reminder_input: set[int] = set()
 awaiting_revelation: set[int] = set()
+awaiting_bible_search: set[int] = set()
 daily_jobs: dict[int, object] = {}
 followup_jobs: dict[int, object] = {}
 
@@ -233,7 +235,7 @@ def menu_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Mark QT Done", callback_data="yes"),
-            InlineKeyboardButton("🔕 Cancel Today’s Reminder", callback_data="cancel_today"),
+            InlineKeyboardButton("📜 Bible Search", callback_data="bible_search"),
         ],
         [
             InlineKeyboardButton("📖 View History", callback_data="history"),
@@ -481,11 +483,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current, longest, _, _, rh, rm, _ = row if row else (0, 0, None, None, 8, 0, None)
         await q.edit_message_text(streak_message_block(current, longest, rh, rm), reply_markup=menu_keyboard())
 
+    # 📖 Bible Search mode
+    if data == "bible_search":
+        awaiting_bible_search.add(uid)
+        await q.edit_message_text(
+            "📖 Please enter a Bible reference (e.g. John 3:16, Romans 8:28, Psalm 23).",
+            reply_markup=back_keyboard()
+        )
+        return
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     name = update.effective_user.first_name or "Unknown"
     ensure_user_record(uid, name)
     text = (update.message.text or "").strip()
+
+    # 📖 Handle Bible verse search
+    if uid in awaiting_bible_search:
+        ref = text.strip().replace(" ", "+")
+        try:
+            response = requests.get(f"https://bible-api.com/{ref}")
+            data = response.json()
+            if "verses" in data:
+                verse_text = "".join(v["text"] for v in data["verses"])
+                ref_name = data.get("reference", "Unknown reference")
+                trans = data.get("translation_name", "Unknown translation")
+                await update.message.reply_text(
+                    f"✝️ *{ref_name}* ({trans})\n\n{verse_text}",
+                    parse_mode="Markdown",
+                    reply_markup=back_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Verse not found. Please try again (e.g. John 3:16)."
+                )
+        except Exception:
+            await update.message.reply_text("⚠️ Error fetching verse. Try again later.")
+        awaiting_bible_search.discard(uid)
+        return
+
 
     if uid in awaiting_reminder_input:
         parts = text.split(":")

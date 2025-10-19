@@ -309,6 +309,13 @@ async def nudge_job_once(context: ContextTypes.DEFAULT_TYPE):
     cancelled_date = row[6]
     today = datetime.now(SGT).strftime("%d/%m/%y")
 
+    if row[2] == today:
+        # reschedule next day's reminder
+        data = getattr(context.job, "data", {}) or {}
+        if data.get("hour") is not None:
+            schedule_user_reminder(context.application, uid, data["hour"], data["minute"])
+        return
+
     if cancelled_date == today:
         data = getattr(context.job, "data", {}) or {}
         if data.get("hour") is not None:
@@ -399,13 +406,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 🆕 Month-based history view
+    # 🆕 Month-based history view (now with long-message safety)
     if data == "history":
         now = datetime.now(SGT)
         year, month = now.year, now.month
         rows = get_revelations_by_month(uid, year, month)
         title = f"📖 {month_name[month]} {year}"
         text = f"{title}\n\n" + ("\n\n".join([f"📝 {d}: {t}" for d, t in rows]) if rows else "📭 No entries this month.")
-        await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
+        MAX_LEN = 4000
+
+        if len(text) > MAX_LEN:
+            # Split long text into multiple Telegram messages
+            for chunk_start in range(0, len(text), MAX_LEN):
+                await q.message.reply_text(text[chunk_start:chunk_start+MAX_LEN])
+            await q.message.reply_text("⬆️ Continued...", reply_markup=month_history_keyboard(uid, year, month))
+        else:
+            await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
         return
 
     if data.startswith("history_prev_") or data.startswith("history_next_"):
@@ -424,8 +440,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = get_revelations_by_month(uid, year, month)
         title = f"📖 {month_name[month]} {year}"
         text = f"{title}\n\n" + ("\n\n".join([f"📝 {d}: {t}" for d, t in rows]) if rows else "📭 No entries this month.")
-        await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
+        MAX_LEN = 4000
+
+        if len(text) > MAX_LEN:
+            for chunk_start in range(0, len(text), MAX_LEN):
+                await q.message.reply_text(text[chunk_start:chunk_start+MAX_LEN])
+            await q.message.reply_text("⬆️ Continued...", reply_markup=month_history_keyboard(uid, year, month))
+        else:
+            await q.edit_message_text(text, reply_markup=month_history_keyboard(uid, year, month))
         return
+
 
     if data == "setrem":
         awaiting_reminder_input.add(uid)
@@ -434,10 +458,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "leaderboard":
         rows = get_all_streaks()
-        text = "📊 Leaderboard:\n\n" + "\n".join([f"{i+1}. {n} — 🔥 {s} (Longest: {l})" for i, (n, s, l) in enumerate(rows)]) if rows else "📭 No data yet."
+        if not rows:
+            await q.edit_message_text("📭 No data yet.", reply_markup=back_keyboard())
+            return
+
+        medals = ["🥇", "🥈", "🥉"]
+        lines = ["📊 Leaderboard:\n"]
+        for i, (n, s, l) in enumerate(rows):
+            if i < 3:
+                rank_display = medals[i]
+            else:
+                rank_display = f"{i + 1}."
+            lines.append(f"{rank_display} {n} — 🔥 {s} (Longest: {l})")
+
+        text = "\n".join(lines)
         await q.edit_message_text(text, reply_markup=back_keyboard())
         return
-
     if data == "back_to_menu":
         awaiting_revelation.discard(uid)
         awaiting_reminder_input.discard(uid)
@@ -476,7 +512,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current += 1
         else:
             current = 1
+        current = max(1, current)
+
         longest = max(longest, current)
+
+
         update_user(uid, name, current, longest, today)
         add_revelation(uid, today, text)
         awaiting_revelation.discard(uid)
